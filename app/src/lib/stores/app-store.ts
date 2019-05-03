@@ -2486,9 +2486,124 @@ export class AppStore extends TypedBaseStore<IAppState> {
   }
 
   public async _refreshRepositoryBy(repository: Repository, context: string) {
-    log.warn(`[refresh] started by ${context}`)
-    await this._refreshRepository(repository)
-    log.warn(`[refresh] completed by ${context}`)
+    if (false) {
+      const message = `[refresh new] started by ${context}`
+      console.time(message)
+      log.warn(message)
+      await this.refreshRepositoryAll(repository)
+      console.timeEnd(message)
+      log.warn(`[refresh new] completed by ${context}`)
+    } else {
+      const message = `[refresh classic] started by ${context}`
+      console.time(message)
+      log.warn(message)
+      await this._refreshRepository(repository)
+      console.timeEnd(message)
+      log.warn(`[refresh classic] completed by ${context}`)
+    }
+  }
+
+  private async refreshRepositoryAll(repository: Repository): Promise<void> {
+    const updatedRepository = await this.refreshRepositoryTip(repository)
+    await this.refreshRepositoryViewHeader(updatedRepository)
+    await this.refreshRepositoryContent(updatedRepository)
+  }
+
+  private async refreshRepositoryTip(
+    repository: Repository
+  ): Promise<Repository> {
+    if (repository.missing) {
+      return repository
+    }
+
+    // if the repository path doesn't exist on disk,
+    // set the flag and don't try anything Git-related
+    const exists = await pathExists(repository.path)
+    if (!exists) {
+      const updatedRepository = await this._updateRepositoryMissing(
+        repository,
+        true
+      )
+      return updatedRepository
+    }
+
+    // if status fails to complete for some reason, mark the repository as missing
+    const status = await this._loadStatus(repository)
+    if (!status) {
+      const updatedRepository = await this._updateRepositoryMissing(
+        repository,
+        true
+      )
+      return updatedRepository
+    }
+
+    return repository
+  }
+
+  /**
+   * Refresh the information in the header required for the current repository
+   *
+   */
+  private async refreshRepositoryViewHeader(
+    repository: Repository
+  ): Promise<void> {
+    if (repository.missing) {
+      return
+    }
+
+    const gitStore = this.gitStoreCache.get(repository)
+    await Promise.all([
+      gitStore.loadBranches(),
+      gitStore.loadRemotes(),
+      gitStore.updateLastFetched(),
+    ])
+
+    const latestState = this.repositoryStateCache.get(repository)
+    this.updateMenuItemLabels(latestState)
+  }
+
+  private async refreshRepositoryContent(
+    repository: Repository
+  ): Promise<void> {
+    if (repository.missing) {
+      return
+    }
+
+    const state = this.repositoryStateCache.get(repository)
+    const gitStore = this.gitStoreCache.get(repository)
+
+    const { selectedSection, branchesState } = state
+    const { tip } = branchesState
+
+    if (selectedSection === RepositorySectionTab.History) {
+      if (tip.kind === TipState.Valid) {
+        await gitStore.loadLocalCommits(tip.branch)
+      }
+
+      this.updateOrSelectFirstCommit(repository, state.compareState.commitSHAs)
+    } else if (selectedSection === RepositorySectionTab.Changes) {
+      if (tip.kind === TipState.Valid) {
+        const currentBranch = tip.branch
+        await gitStore.loadLocalCommits(currentBranch)
+      } else if (tip.kind === TipState.Unborn) {
+        await gitStore.loadLocalCommits(null)
+      }
+    } else {
+      return assertNever(selectedSection, `Unknown section: ${selectedSection}`)
+    }
+
+    await Promise.all([
+      gitStore.loadStashEntries(),
+      this.refreshAuthor(repository),
+    ])
+
+    this._updateCurrentPullRequest(repository)
+
+    const latestState = this.repositoryStateCache.get(repository)
+    this.updateMenuItemLabels(latestState)
+
+    this._initializeCompare(repository)
+    this.refreshIndicatorsForRepositories([repository], false)
   }
 
   /** This shouldn't be called directly. See `Dispatcher`. */
@@ -2501,7 +2616,7 @@ export class AppStore extends TypedBaseStore<IAppState> {
     // set the flag and don't try anything Git-related
     const exists = await pathExists(repository.path)
     if (!exists) {
-      this._updateRepositoryMissing(repository, true)
+      await this._updateRepositoryMissing(repository, true)
       return
     }
 
